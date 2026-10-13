@@ -9,8 +9,29 @@ import {
 let client;
 let db;
 
+/** Strip quotes / whitespace Railway UI sometimes adds when pasting. */
+function normalizeMongoUri(raw) {
+  let uri = String(raw || '')
+    .trim()
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/\s+/g, '');
+  return uri;
+}
+
 function atlasHelpMessage(err) {
   const msg = String(err?.message || err || '');
+
+  if (/bad auth|Authentication failed/i.test(msg)) {
+    return (
+      '\n\n[Atlas auth failed] Check Railway Variable MONGODB_URI:\n' +
+      '1. No quotes around the value\n' +
+      '2. Username + password match Atlas → Database Access\n' +
+      '3. If password has @ # % etc, URL-encode them\n' +
+      '4. Full form: mongodb+srv://USER:PASS@host/?retryWrites=true&w=majority\n' +
+      '5. Or reset the DB user password in Atlas and update Railway\n'
+    );
+  }
+
   const isTls =
     /SSL|TLS|tlsv1|ALERT_INTERNAL/i.test(msg) ||
     err?.name === 'MongoServerSelectionError' ||
@@ -20,16 +41,14 @@ function atlasHelpMessage(err) {
 
   return (
     '\n\n[Atlas / Railway] Usual fixes:\n' +
-    '1. MongoDB Atlas → Network Access → Add IP Address → Allow Access from Anywhere (0.0.0.0/0)\n' +
-    '   (Railway outbound IPs change; local IP whitelist alone is not enough.)\n' +
-    '2. Use a full SRV URI, e.g.\n' +
-    '   mongodb+srv://USER:PASS@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority\n' +
+    '1. MongoDB Atlas → Network Access → Allow Access from Anywhere (0.0.0.0/0)\n' +
+    '2. Use a full SRV URI with ?retryWrites=true&w=majority\n' +
     '3. Atlas → Database Access: user can read/write the DB.\n'
   );
 }
 
 export async function connectDb() {
-  const uri = (process.env.MONGODB_URI || '').trim();
+  const uri = normalizeMongoUri(process.env.MONGODB_URI);
   if (!uri) {
     throw new Error(
       'MONGODB_URI is not set. Set it in Railway Variables (or backend/.env locally).'
@@ -37,6 +56,14 @@ export async function connectDb() {
   }
 
   if (db) return db;
+
+  // Log host only (never user/password) to confirm Railway picked up the var
+  try {
+    const host = uri.split('@')[1]?.split('/')[0] || '(unknown host)';
+    console.log('[tiptap-api] Connecting to Mongo host:', host);
+  } catch {
+    // ignore
+  }
 
   client = new MongoClient(uri, {
     serverSelectionTimeoutMS: 20000,
