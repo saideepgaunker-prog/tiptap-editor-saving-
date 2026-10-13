@@ -53,5 +53,11 @@ Set Railway `CORS_ORIGIN` to the Vercel URL (update if preview URLs need access 
 ## Notes
 
 - Demo uses a random `localStorage` user id (no login). Cross-device sync needs real auth later.
-- Dictation needs Chrome/Edge + mic permission (browser Web Speech API).
-# tiptap-editor-saving-
+- Dictation needs **Chrome/Edge**, **HTTPS** (Vercel URL), and mic permission. It does **not** run on the Railway API URL (API only).
+- If Railway logs show `TLS` / `ReplicaSetNoPrimary`: Atlas → **Network Access** → allow `0.0.0.0/0` (or Railway IPs), then redeploy.
+
+## Atlas checklist (Railway Mongo crash)
+
+1. Atlas → Network Access → **Allow Access from Anywhere** `0.0.0.0/0`
+2. Railway Variables → `MONGODB_URI` = full `mongodb+srv://.../?retryWrites=true&w=majority`
+3. Redeploy API → open `/api/health`
