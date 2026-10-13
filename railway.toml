@@ -1,0 +1,12 @@
+# Deploy THIS repo's API on Railway (git root = tiptap folder).
+# Do NOT build the Vite frontend here — that goes to Vercel.
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm install --prefix backend"
+
+[deploy]
+startCommand = "npm start --prefix backend"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"

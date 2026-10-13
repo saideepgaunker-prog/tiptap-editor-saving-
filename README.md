@@ -33,9 +33,14 @@ Locally leave `frontend` `VITE_API_BASE` empty (Vite proxies `/api` → backend)
 
 ### 1. Railway (backend)
 
-1. Root directory: `text-editor-options/tiptap/backend`
-2. Env: `MONGODB_URI`, `MONGODB_DB`, `CORS_ORIGIN=https://YOUR-VERCEL-APP.vercel.app`
-3. Note the public API URL
+If this GitHub repo **is** the `tiptap` folder (has `frontend/` + `backend/` at root):
+
+1. Leave Root Directory empty (repo root).
+2. `railway.toml` installs/starts **backend only** (no Vite).
+3. Env: `MONGODB_URI`, `MONGODB_DB`, `CORS_ORIGIN=https://YOUR-VERCEL-APP.vercel.app`
+4. Redeploy.
+
+If the repo is the full Storygroove monorepo, set Root Directory to `text-editor-options/tiptap/backend` instead.
 
 ### 2. Vercel (frontend)
 

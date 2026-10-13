@@ -1,5 +1,7 @@
+# Use when Railway Root Directory = backend/
 [build]
 builder = "NIXPACKS"
+buildCommand = "npm install"
 
 [deploy]
 startCommand = "npm start"
