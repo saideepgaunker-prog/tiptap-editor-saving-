@@ -48,7 +48,9 @@ If the repo is the full Storygroove monorepo, set Root Directory to `text-editor
 2. Env: `VITE_API_BASE=https://YOUR-RAILWAY-APP.up.railway.app` (no trailing slash)
 3. Deploy
 
-Set Railway `CORS_ORIGIN` to the Vercel URL (update if preview URLs need access too — comma-separated).
+Set Railway `CORS_ORIGIN` to your Vercel URL(s), e.g.  
+`https://tiptap-editor-saving-git-main-sjinnovation.vercel.app`  
+(API also allows `https://*.vercel.app` previews.) If Network shows **CORS error** on `PUT .../me`, this variable is wrong or missing — then UI shows **Offline — saved locally**.
 
 ## Notes
 
