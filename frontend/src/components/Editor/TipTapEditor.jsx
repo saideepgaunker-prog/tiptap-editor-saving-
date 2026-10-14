@@ -152,6 +152,13 @@ export const TipTapEditor = forwardRef(function TipTapEditor(
   const resolveInitialHtml = () => {
     if (isControlled) return content;
     if (typeof initialContent === 'string') return initialContent;
+    // Authenticated: start empty — Mongo/local resolve fills content after boot.
+    // Avoid injecting SAMPLE (it was overwriting other devices' cloud drafts).
+    if (userIdProp) {
+      const local = readLocalManuscript(accountUserId);
+      if (local?.html && local.pendingSync) return local.html;
+      return '<p><br></p>';
+    }
     if (persistLocal) {
       const local = readLocalManuscript(accountUserId);
       if (local?.html) return local.html;
@@ -185,6 +192,7 @@ export const TipTapEditor = forwardRef(function TipTapEditor(
     recoveredFromLocal,
     notifyContentChanged,
     flushNow,
+    bootDone,
   } = useManuscriptAutosave({
     enabled: persistLocal && !isControlled && !readOnly && Boolean(accountUserId),
     userId: accountUserId,

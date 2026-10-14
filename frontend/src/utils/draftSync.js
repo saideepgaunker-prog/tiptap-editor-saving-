@@ -7,7 +7,7 @@ export const LOCAL_AUTOSAVE_MS = 400;
 export const DB_AUTOSAVE_MS = 800;
 export const DB_RETRY_MS = 2000;
 
-/** Stable demo user id (one manuscript per user). */
+/** Stable demo user id (one manuscript per user) — only used if auth userId missing. */
 export const getOrCreateDemoUserId = () => {
   try {
     let id = localStorage.getItem(USER_ID_KEY);
@@ -33,8 +33,8 @@ export const readLocalManuscript = (userId) => {
       typeof parsed.html === 'string'
         ? parsed.html
         : typeof parsed.userContent === 'string'
-        ? parsed.userContent
-        : null;
+          ? parsed.userContent
+          : null;
     if (typeof html !== 'string') return null;
     return {
       html,
@@ -42,8 +42,8 @@ export const readLocalManuscript = (userId) => {
         typeof parsed.title === 'string'
           ? parsed.title
           : typeof parsed.sceneTitle === 'string'
-          ? parsed.sceneTitle
-          : 'Untitled Manuscript',
+            ? parsed.sceneTitle
+            : 'Untitled Manuscript',
       updatedAt:
         typeof parsed.updatedAt === 'number'
           ? parsed.updatedAt
@@ -64,7 +64,6 @@ export const writeLocalManuscript = (userId, { html, title, pendingSync = false 
   try {
     const htmlValue = html ?? '<p><br></p>';
     const titleValue = title || 'Untitled Manuscript';
-    // Mirror Storygroove UserContent field names alongside editor aliases
     const payload = {
       html: htmlValue,
       userContent: htmlValue,
@@ -87,12 +86,16 @@ export const markLocalSynced = (userId, { html, title, remoteUpdatedAt } = {}) =
   const nextHtml = html ?? existing?.html ?? '<p><br></p>';
   const nextTitle = title ?? existing?.title ?? 'Untitled Manuscript';
   try {
+    const remoteMs = remoteUpdatedAt
+      ? Date.parse(remoteUpdatedAt) || Date.now()
+      : Date.now();
     const payload = {
       html: nextHtml,
+      userContent: nextHtml,
       title: nextTitle,
-      updatedAt: remoteUpdatedAt
-        ? Date.parse(remoteUpdatedAt) || Date.now()
-        : existing?.updatedAt || Date.now(),
+      sceneTitle: nextTitle,
+      // Keep local clock aligned with server so other devices win next boot
+      updatedAt: remoteMs,
       pendingSync: false,
       savedAt: new Date().toISOString(),
     };
@@ -104,8 +107,10 @@ export const markLocalSynced = (userId, { html, title, remoteUpdatedAt } = {}) =
 };
 
 /**
- * Prefer newer / unsynced local HTML over older DB HTML.
- * Matches Storygroove resolveDraftForScene intent.
+ * Cross-device load rules (authenticated demos):
+ * - Mongo is source of truth when online and local is not waiting to upload
+ * - Local wins only while pendingSync AND local is not older than remote
+ * - If remote is newer than a stuck pending local, take remote (other device won)
  */
 export const resolveManuscriptForLoad = (local, remote) => {
   if (!local && !remote) {
@@ -117,36 +122,58 @@ export const resolveManuscriptForLoad = (local, remote) => {
       html: local.html,
       title: local.title,
       source: 'local',
-      recovered: true,
+      recovered: Boolean(local.pendingSync),
     };
   }
 
   if (!local && remote) {
     return {
-      html: remote.html,
-      title: remote.title,
+      html: remote.html ?? remote.userContent,
+      title: remote.title ?? remote.sceneTitle,
       source: 'remote',
       recovered: false,
     };
   }
 
+  const remoteHtml = remote.html ?? remote.userContent;
+  const remoteTitle = remote.title ?? remote.sceneTitle;
   const remoteTs = Date.parse(remote.updatedAt || '') || 0;
   const localTs = local.updatedAt || 0;
-  const htmlDiffers = !areManuscriptHtmlEquivalent(local.html, remote.html);
+  const htmlDiffers = !areManuscriptHtmlEquivalent(local.html, remoteHtml);
 
-  // Local wins when it is newer OR still waiting to sync
-  if (local.pendingSync || localTs > remoteTs || (htmlDiffers && localTs >= remoteTs)) {
+  // Pending upload: keep local only if it isn't stale vs server
+  if (local.pendingSync && htmlDiffers) {
+    if (remoteTs > localTs) {
+      return {
+        html: remoteHtml,
+        title: remoteTitle || local.title,
+        source: 'remote',
+        recovered: false,
+      };
+    }
     return {
       html: local.html,
-      title: local.title || remote.title,
+      title: local.title || remoteTitle,
       source: 'local',
-      recovered: htmlDiffers || local.pendingSync,
+      recovered: true,
     };
   }
 
+  // Synced (or equivalent): prefer remote for cross-device consistency
+  if (remoteTs >= localTs || !htmlDiffers) {
+    return {
+      html: remoteHtml,
+      title: remoteTitle || local.title,
+      source: 'remote',
+      recovered: false,
+    };
+  }
+
+  // Local clock ahead but not pending — still prefer remote when content differs
+  // so opening mobile doesn't keep an old cache over desktop saves.
   return {
-    html: remote.html,
-    title: remote.title || local.title,
+    html: remoteHtml,
+    title: remoteTitle || local.title,
     source: 'remote',
     recovered: false,
   };
