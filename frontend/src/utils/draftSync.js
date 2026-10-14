@@ -108,9 +108,9 @@ export const markLocalSynced = (userId, { html, title, remoteUpdatedAt } = {}) =
 
 /**
  * Cross-device load rules (authenticated demos):
- * - Mongo is source of truth when online and local is not waiting to upload
- * - Local wins only while pendingSync AND local is not older than remote
- * - If remote is newer than a stuck pending local, take remote (other device won)
+ * - If local has pendingSync (offline edits waiting), ALWAYS keep local then upload
+ *   (never drop mobile offline work on reload)
+ * - Otherwise Mongo/remote is source of truth
  */
 export const resolveManuscriptForLoad = (local, remote) => {
   if (!local && !remote) {
@@ -141,16 +141,8 @@ export const resolveManuscriptForLoad = (local, remote) => {
   const localTs = local.updatedAt || 0;
   const htmlDiffers = !areManuscriptHtmlEquivalent(local.html, remoteHtml);
 
-  // Pending upload: keep local only if it isn't stale vs server
+  // Offline edits waiting to upload — never discard on reload (mobile fix)
   if (local.pendingSync && htmlDiffers) {
-    if (remoteTs > localTs) {
-      return {
-        html: remoteHtml,
-        title: remoteTitle || local.title,
-        source: 'remote',
-        recovered: false,
-      };
-    }
     return {
       html: local.html,
       title: local.title || remoteTitle,
@@ -159,7 +151,16 @@ export const resolveManuscriptForLoad = (local, remote) => {
     };
   }
 
-  // Synced (or equivalent): prefer remote for cross-device consistency
+  if (local.pendingSync && !htmlDiffers) {
+    return {
+      html: remoteHtml,
+      title: remoteTitle || local.title,
+      source: 'remote',
+      recovered: false,
+    };
+  }
+
+  // Synced: prefer remote for cross-device consistency
   if (remoteTs >= localTs || !htmlDiffers) {
     return {
       html: remoteHtml,
@@ -169,8 +170,6 @@ export const resolveManuscriptForLoad = (local, remote) => {
     };
   }
 
-  // Local clock ahead but not pending — still prefer remote when content differs
-  // so opening mobile doesn't keep an old cache over desktop saves.
   return {
     html: remoteHtml,
     title: remoteTitle || local.title,
@@ -179,5 +178,6 @@ export const resolveManuscriptForLoad = (local, remote) => {
   };
 };
 
+/** Fast flag only — prefer probeApiOnline / isReallyOnline for sync decisions. */
 export const isOnline = () =>
   typeof navigator === 'undefined' ? true : navigator.onLine !== false;

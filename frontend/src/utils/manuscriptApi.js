@@ -43,15 +43,14 @@ async function parseJson(res) {
  * @returns {Promise<object|null>}
  */
 export async function fetchManuscript(_userId) {
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    throw new ManuscriptApiError('Offline', { offline: true, code: 'OFFLINE' });
-  }
-
+  // Do not gate on navigator.onLine — mobile browsers often keep it false
+  // after reconnect even when the network works. Let fetch fail naturally.
   let res;
   try {
     res = await fetch(apiUrl('/api/manuscripts/me'), {
       method: 'GET',
       headers: authHeaders(),
+      cache: 'no-store',
     });
   } catch {
     throw new ManuscriptApiError('Network error', { offline: true, code: 'OFFLINE' });
@@ -80,15 +79,14 @@ export async function fetchManuscript(_userId) {
  * Upsert Storygroove-style HTML to MongoDB (auth user from JWT).
  */
 export async function saveManuscriptToDb({ title, html }) {
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    throw new ManuscriptApiError('Offline', { offline: true, code: 'OFFLINE' });
-  }
-
+  // Do not gate on navigator.onLine — mobile reconnect can probe OK while
+  // navigator.onLine is still false; that blocked desktop-like flush before.
   let res;
   try {
     res = await fetch(apiUrl('/api/manuscripts/me'), {
       method: 'PUT',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
+      cache: 'no-store',
       body: JSON.stringify({
         title,
         sceneTitle: title,

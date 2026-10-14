@@ -11,11 +11,14 @@ import {
   resolveManuscriptForLoad,
   writeLocalManuscript,
 } from '../utils/draftSync.js';
+import { isReallyOnline, probeApiOnline } from '../utils/connectivity.js';
 import {
   fetchManuscript,
   isRetryableSaveError,
   saveManuscriptToDb,
 } from '../utils/manuscriptApi.js';
+
+const ONLINE_POLL_MS = 3000;
 
 /**
  * Boot resolve + debounced local/DB HTML autosave for one manuscript per user.
@@ -39,11 +42,13 @@ export function useManuscriptAutosave({
   const localTimerRef = useRef(null);
   const dbTimerRef = useRef(null);
   const retryTimerRef = useRef(null);
+  const pollTimerRef = useRef(null);
   const lastSyncedHtmlRef = useRef(null);
   const pendingHtmlRef = useRef(null);
   const pendingTitleRef = useRef(null);
   const flushingRef = useRef(false);
   const bootDoneRef = useRef(!enabled);
+  const wasOfflineRef = useRef(false);
   const getHtmlRef = useRef(getHtml);
   const getTitleRef = useRef(getTitle);
   const onResolvedRef = useRef(onResolvedContent);
@@ -57,20 +62,18 @@ export function useManuscriptAutosave({
     if (localTimerRef.current) clearTimeout(localTimerRef.current);
     if (dbTimerRef.current) clearTimeout(dbTimerRef.current);
     if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     localTimerRef.current = null;
     dbTimerRef.current = null;
     retryTimerRef.current = null;
+    pollTimerRef.current = null;
   };
 
-  const persistLocalNow = useCallback(
-    (html, title, { pendingSync } = {}) => {
-      const userId = userIdRef.current;
-      const online = isOnline();
-      const flag = pendingSync != null ? pendingSync : !online;
-      writeLocalManuscript(userId, { html, title, pendingSync: flag });
-    },
-    []
-  );
+  const persistLocalNow = useCallback((html, title, { pendingSync } = {}) => {
+    const userId = userIdRef.current;
+    const flag = pendingSync != null ? pendingSync : !isOnline();
+    writeLocalManuscript(userId, { html, title, pendingSync: flag });
+  }, []);
 
   const flushToDb = useCallback(async () => {
     if (!enabled || flushingRef.current || !bootDoneRef.current) return;
@@ -78,7 +81,9 @@ export function useManuscriptAutosave({
     const title = pendingTitleRef.current;
     if (html == null) return;
 
-    if (!isOnline()) {
+    const online = await isReallyOnline();
+    if (!online) {
+      wasOfflineRef.current = true;
       persistLocalNow(html, title, { pendingSync: true });
       setSaveStatus('offline');
       return;
@@ -90,6 +95,7 @@ export function useManuscriptAutosave({
     ) {
       markLocalSynced(userIdRef.current, { html, title });
       setSaveStatus('saved');
+      wasOfflineRef.current = false;
       return;
     }
 
@@ -97,10 +103,7 @@ export function useManuscriptAutosave({
     setSaveStatus('saving');
 
     try {
-      const saved = await saveManuscriptToDb({
-        title,
-        html,
-      });
+      const saved = await saveManuscriptToDb({ title, html });
       lastSyncedHtmlRef.current = html;
       markLocalSynced(userIdRef.current, {
         html,
@@ -109,6 +112,7 @@ export function useManuscriptAutosave({
       });
       setSaveStatus('saved');
       setLastSavedTime(new Date());
+      wasOfflineRef.current = false;
 
       const latest = getHtmlRef.current?.();
       if (latest != null && !areManuscriptHtmlEquivalent(latest, html)) {
@@ -119,6 +123,7 @@ export function useManuscriptAutosave({
         }, 0);
       }
     } catch (err) {
+      wasOfflineRef.current = true;
       persistLocalNow(html, title, { pendingSync: true });
       if (err?.offline || err?.code === 'OFFLINE') {
         setSaveStatus('offline');
@@ -135,30 +140,87 @@ export function useManuscriptAutosave({
     }
   }, [enabled, persistLocalNow]);
 
+  const flushToDbRef = useRef(flushToDb);
+  flushToDbRef.current = flushToDb;
+
+  /** After reconnect: push any pending local draft to Mongo. */
+  const syncPendingAfterReconnect = useCallback(async () => {
+    if (!enabled || !bootDoneRef.current) return;
+
+    const online = await isReallyOnline();
+    if (!online) {
+      wasOfflineRef.current = true;
+      setSaveStatus('offline');
+      return;
+    }
+
+    const local = readLocalManuscript(userIdRef.current);
+    const liveHtml = getHtmlRef.current?.();
+    const liveTitle = getTitleRef.current?.();
+
+    // Prefer in-memory editor content if present
+    if (liveHtml != null) {
+      pendingHtmlRef.current = liveHtml;
+      pendingTitleRef.current = liveTitle || local?.title || 'Untitled Manuscript';
+      persistLocalNow(liveHtml, pendingTitleRef.current, { pendingSync: true });
+    } else if (local?.pendingSync && local.html) {
+      pendingHtmlRef.current = local.html;
+      pendingTitleRef.current = local.title;
+    } else if (local?.html) {
+      pendingHtmlRef.current = local.html;
+      pendingTitleRef.current = local.title;
+    }
+
+    if (pendingHtmlRef.current != null) {
+      await flushToDbRef.current();
+    } else {
+      setSaveStatus('saved');
+      wasOfflineRef.current = false;
+    }
+  }, [enabled, persistLocalNow]);
+
+  const syncPendingRef = useRef(syncPendingAfterReconnect);
+  syncPendingRef.current = syncPendingAfterReconnect;
+
   /** Call from editor onUpdate with already-normalized HTML. */
   const notifyContentChanged = useCallback(
     (normalizedHtml, title) => {
       if (!enabled) return;
-      // Do not write/push until Mongo vs local boot finished (prevents sample overwrite)
       if (!bootDoneRef.current) return;
 
       pendingHtmlRef.current = normalizedHtml;
       pendingTitleRef.current = title || 'Untitled Manuscript';
-      setSaveStatus((prev) => (prev === 'offline' ? 'offline' : 'unsaved'));
 
-      if (localTimerRef.current) clearTimeout(localTimerRef.current);
-      localTimerRef.current = setTimeout(() => {
-        const online = isOnline();
+      const browserOffline = !isOnline();
+      const treatAsOffline = browserOffline || wasOfflineRef.current;
+      setSaveStatus((prev) =>
+        treatAsOffline || prev === 'offline' ? 'offline' : 'unsaved'
+      );
+
+      // Always keep pendingSync until Mongo confirms — mobile navigator.onLine lies.
+      // Offline / was-offline: write localStorage immediately (debounce can be killed).
+      if (treatAsOffline) {
         persistLocalNow(normalizedHtml, pendingTitleRef.current, {
-          pendingSync: !online,
+          pendingSync: true,
         });
-        if (!online) setSaveStatus('offline');
-      }, LOCAL_AUTOSAVE_MS);
+        setSaveStatus('offline');
+      } else {
+        if (localTimerRef.current) clearTimeout(localTimerRef.current);
+        localTimerRef.current = setTimeout(() => {
+          persistLocalNow(normalizedHtml, pendingTitleRef.current, {
+            pendingSync: true,
+          });
+          if (!isOnline()) {
+            wasOfflineRef.current = true;
+            setSaveStatus('offline');
+          }
+        }, LOCAL_AUTOSAVE_MS);
+      }
 
       if (dbTimerRef.current) clearTimeout(dbTimerRef.current);
       dbTimerRef.current = setTimeout(() => {
         flushToDb();
-      }, DB_AUTOSAVE_MS);
+      }, treatAsOffline ? 500 : DB_AUTOSAVE_MS);
     },
     [enabled, flushToDb, persistLocalNow]
   );
@@ -174,12 +236,15 @@ export function useManuscriptAutosave({
 
     pendingHtmlRef.current = html;
     pendingTitleRef.current = title;
-    persistLocalNow(html, title, { pendingSync: !isOnline() });
+    const online = await isReallyOnline();
+    persistLocalNow(html, title, { pendingSync: !online });
+    if (!online) {
+      wasOfflineRef.current = true;
+      setSaveStatus('offline');
+      return;
+    }
     await flushToDb();
   }, [enabled, flushToDb, persistLocalNow]);
-
-  const flushToDbRef = useRef(flushToDb);
-  flushToDbRef.current = flushToDb;
 
   const applyResolved = useCallback((resolved, remote) => {
     setRecoveredFromLocal(Boolean(resolved.recovered));
@@ -203,15 +268,18 @@ export function useManuscriptAutosave({
           title: resolved.title,
           remoteUpdatedAt: remote?.updatedAt,
         });
+      } else if (resolved.source === 'local' && resolved.recovered) {
+        // Keep pendingSync so reconnect/reload still uploads
+        persistLocalNow(resolved.html, resolved.title, { pendingSync: true });
       }
 
-      if (resolved.source === 'local' && resolved.recovered && isOnline()) {
+      if (resolved.source === 'local' && resolved.recovered) {
         setTimeout(() => flushToDbRef.current(), 0);
       }
     }
-  }, []);
+  }, [persistLocalNow]);
 
-  // Boot: load Mongo first for cross-device, then merge with local pending only
+  // Boot
   useEffect(() => {
     if (!enabled) {
       setBootDone(true);
@@ -230,10 +298,15 @@ export function useManuscriptAutosave({
       const local = readLocalManuscript(userId);
       let remote = null;
 
-      try {
-        remote = await fetchManuscript(userId);
-      } catch {
-        // Offline or API down — keep local
+      const online = await isReallyOnline();
+      if (online) {
+        try {
+          remote = await fetchManuscript(userId);
+        } catch {
+          wasOfflineRef.current = true;
+        }
+      } else {
+        wasOfflineRef.current = true;
       }
 
       if (cancelled) return;
@@ -244,8 +317,17 @@ export function useManuscriptAutosave({
       setBootDone(true);
       bootDoneRef.current = true;
       setSaveStatus(
-        !isOnline() ? 'offline' : resolved.recovered ? 'unsaved' : 'saved'
+        !online || wasOfflineRef.current
+          ? resolved.recovered
+            ? 'unsaved'
+            : online
+              ? 'saved'
+              : 'offline'
+          : resolved.recovered
+            ? 'unsaved'
+            : 'saved'
       );
+      if (!online) setSaveStatus('offline');
       if (resolved.source === 'remote' || (local && !local.pendingSync)) {
         setLastSavedTime(new Date());
       }
@@ -256,67 +338,35 @@ export function useManuscriptAutosave({
     };
   }, [enabled, userIdProp, applyResolved]);
 
-  // Pull latest from Mongo when returning to the tab / device
+  // Mobile-friendly reconnect detection: events + polling + focus/pageshow
   useEffect(() => {
     if (!enabled) return undefined;
 
-    const pullRemoteIfNeeded = async () => {
-      if (!bootDoneRef.current || !isOnline() || flushingRef.current) return;
-
-      const userId = userIdRef.current;
-      const local = readLocalManuscript(userId);
-      // Don't clobber an unsynced local draft mid-edit
-      if (local?.pendingSync) {
-        flushToDbRef.current();
+    const handlePossiblyOnline = async () => {
+      const online = await probeApiOnline();
+      if (!online) {
+        wasOfflineRef.current = true;
+        setSaveStatus((s) => (s === 'saving' ? s : 'offline'));
+        // Snapshot editor to local immediately
+        const html = getHtmlRef.current?.();
+        const title = getTitleRef.current?.();
+        if (html != null && bootDoneRef.current) {
+          persistLocalNow(html, title, { pendingSync: true });
+        }
         return;
       }
 
-      let remote = null;
-      try {
-        remote = await fetchManuscript(userId);
-      } catch {
-        return;
-      }
-      if (!remote) return;
-
-      const currentHtml = getHtmlRef.current?.() ?? local?.html;
-      const remoteHtml = remote.html ?? remote.userContent;
-      if (
-        currentHtml != null &&
-        areManuscriptHtmlEquivalent(currentHtml, remoteHtml)
-      ) {
-        return;
-      }
-
-      const resolved = resolveManuscriptForLoad(local, remote);
-      if (resolved.source === 'remote') {
-        applyResolved(resolved, remote);
-        setSaveStatus('saved');
-        setLastSavedTime(new Date());
+      if (wasOfflineRef.current || readLocalManuscript(userIdRef.current)?.pendingSync) {
+        await syncPendingRef.current();
       }
     };
 
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        pullRemoteIfNeeded();
-      }
+    const onBrowserOnline = () => {
+      handlePossiblyOnline();
     };
 
-    const onFocus = () => pullRemoteIfNeeded();
-
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [enabled, applyResolved]);
-
-  // Online / offline events
-  useEffect(() => {
-    if (!enabled) return undefined;
-
-    const onOffline = () => {
+    const onBrowserOffline = () => {
+      wasOfflineRef.current = true;
       setSaveStatus('offline');
       const html = getHtmlRef.current?.();
       const title = getTitleRef.current?.();
@@ -325,39 +375,53 @@ export function useManuscriptAutosave({
       }
     };
 
-    const onOnline = () => {
-      pullAndFlush();
-    };
-
-    const pullAndFlush = async () => {
-      const local = readLocalManuscript(userIdRef.current);
-      if (local?.pendingSync) {
-        pendingHtmlRef.current = local.html;
-        pendingTitleRef.current = local.title;
-        flushToDb();
-        return;
-      }
-      try {
-        const remote = await fetchManuscript(userIdRef.current);
-        if (remote) {
-          const resolved = resolveManuscriptForLoad(local, remote);
-          applyResolved(resolved, remote);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        handlePossiblyOnline();
+      } else {
+        // Tab backgrounded — flush local now (mobile kill risk)
+        const html = getHtmlRef.current?.();
+        const title = getTitleRef.current?.();
+        if (html != null && bootDoneRef.current) {
+          persistLocalNow(html, title, {
+            pendingSync: wasOfflineRef.current || !isOnline(),
+          });
         }
-      } catch {
-        // ignore
+        flushToDbRef.current();
       }
-      setSaveStatus('saved');
     };
 
-    window.addEventListener('offline', onOffline);
-    window.addEventListener('online', onOnline);
+    const onPageShow = (e) => {
+      // bfcache restore on iOS
+      if (e?.persisted || document.visibilityState === 'visible') {
+        handlePossiblyOnline();
+      }
+    };
+
+    window.addEventListener('online', onBrowserOnline);
+    window.addEventListener('offline', onBrowserOffline);
+    window.addEventListener('focus', handlePossiblyOnline);
+    window.addEventListener('pageshow', onPageShow);
+    document.addEventListener('visibilitychange', onVisible);
+
+    // Poll while tab visible — critical for mobile reconnect
+    pollTimerRef.current = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      handlePossiblyOnline();
+    }, ONLINE_POLL_MS);
+
     return () => {
-      window.removeEventListener('offline', onOffline);
-      window.removeEventListener('online', onOnline);
+      window.removeEventListener('online', onBrowserOnline);
+      window.removeEventListener('offline', onBrowserOffline);
+      window.removeEventListener('focus', handlePossiblyOnline);
+      window.removeEventListener('pageshow', onPageShow);
+      document.removeEventListener('visibilitychange', onVisible);
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
     };
-  }, [enabled, flushToDb, persistLocalNow, applyResolved]);
+  }, [enabled, persistLocalNow]);
 
-  // Flush on hide / unload
+  // Flush on unload
   useEffect(() => {
     if (!enabled) return undefined;
 
@@ -365,25 +429,22 @@ export function useManuscriptAutosave({
       if (!bootDoneRef.current) return;
       const html = getHtmlRef.current?.();
       const title = getTitleRef.current?.();
-      if (html != null) {
-        persistLocalNow(html, title, { pendingSync: !isOnline() });
-      }
-    };
-
-    const onVisibility = () => {
-      if (document.visibilityState === 'hidden') {
-        flushLocalOnly();
-        flushNow();
-      }
+      if (html == null) return;
+      const unsynced =
+        wasOfflineRef.current ||
+        !isOnline() ||
+        lastSyncedHtmlRef.current == null ||
+        !areManuscriptHtmlEquivalent(html, lastSyncedHtmlRef.current);
+      persistLocalNow(html, title, { pendingSync: unsynced });
     };
 
     window.addEventListener('beforeunload', flushLocalOnly);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', flushLocalOnly);
     return () => {
       window.removeEventListener('beforeunload', flushLocalOnly);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', flushLocalOnly);
     };
-  }, [enabled, flushNow, persistLocalNow]);
+  }, [enabled, persistLocalNow]);
 
   useEffect(() => () => clearTimers(), []);
 
