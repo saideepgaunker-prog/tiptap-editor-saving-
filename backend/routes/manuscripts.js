@@ -5,8 +5,11 @@ import {
   DEMO_SCENE_DEFAULTS,
   serializeUserContentDoc,
 } from '../schemas/editorSchemas.js';
+import { requireAuth } from '../auth.js';
 
 const router = Router();
+
+router.use(requireAuth);
 
 /** Mirror Storygroove: HTML → plain text companion (not on UserContent in prod, handy for demo). */
 function htmlToPlainText(html = '') {
@@ -50,15 +53,12 @@ async function ensureDemoNovel(userId, title) {
 }
 
 /**
- * GET /api/manuscripts/me?userId=
- * Loads the UserContent row for this demo user (Storygroove-shaped).
+ * GET /api/manuscripts/me
+ * Loads the UserContent row for the authenticated user.
  */
 router.get('/me', async (req, res) => {
   try {
-    const userId = String(req.query.userId || '').trim();
-    if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
-    }
+    const userId = req.user.id;
 
     const contentCol = userContentCollection();
     const doc = await contentCol.findOne({
@@ -85,27 +85,22 @@ router.get('/me', async (req, res) => {
 
 /**
  * PUT /api/manuscripts/me
- * Body: { userId, title?, html }  (html = Storygroove-normalized userContent)
- *
- * Upserts Novel + UserContent the way Book Editor persists scene prose.
+ * Body: { title?, html }  (html = Storygroove-normalized userContent)
  */
 router.put('/me', async (req, res) => {
   try {
-    const userId = String(req.body?.userId || '').trim();
+    const userId = req.user.id;
     const html =
       typeof req.body?.html === 'string'
         ? req.body.html
         : typeof req.body?.userContent === 'string'
-        ? req.body.userContent
-        : null;
+          ? req.body.userContent
+          : null;
     const title =
       (typeof req.body?.title === 'string' && req.body.title.trim()) ||
       (typeof req.body?.sceneTitle === 'string' && req.body.sceneTitle.trim()) ||
       'Untitled Manuscript';
 
-    if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
-    }
     if (html == null) {
       return res.status(400).json({ error: 'html (userContent) is required' });
     }

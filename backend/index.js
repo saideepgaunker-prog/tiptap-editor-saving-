@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { connectDb, closeDb } from './db.js';
+import { ensureUserIndexes } from './auth.js';
+import authRouter from './routes/auth.js';
 import manuscriptsRouter from './routes/manuscripts.js';
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -51,6 +53,7 @@ function corsOriginDelegate(origin, callback) {
 
 async function main() {
   await connectDb();
+  await ensureUserIndexes();
   console.log('[tiptap-api] Connected to MongoDB');
 
   const app = express();
@@ -66,7 +69,7 @@ async function main() {
     cors({
       origin: corsOriginDelegate,
       methods: ['GET', 'PUT', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Accept'],
+      allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
       optionsSuccessStatus: 204,
     })
   );
@@ -84,6 +87,7 @@ async function main() {
     res.json({ ok: true, service: 'tiptap-manuscript-api' });
   });
 
+  app.use('/api/auth', authRouter);
   app.use('/api/manuscripts', manuscriptsRouter);
 
   app.use((err, _req, res, _next) => {

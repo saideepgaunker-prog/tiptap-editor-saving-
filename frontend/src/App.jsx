@@ -1,5 +1,7 @@
 import React from 'react';
 import TipTapEditor from './components/Editor/TipTapEditor';
+import AuthPage from './components/Auth/AuthPage';
+import { AuthProvider, useAuth } from './context/AuthContext';
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -36,12 +38,39 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+function AppShell() {
+  const { booting, isAuthenticated, user, logout } = useAuth();
+
+  if (booting) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-sm text-slate-500">
+        Checking session…
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <AuthPage />;
+  }
+
+  return (
+    <div className="w-full min-h-screen">
+      <TipTapEditor
+        key={user.id}
+        userId={user.id}
+        userEmail={user.email}
+        onLogout={logout}
+      />
+    </div>
+  );
+}
+
 export function App() {
   return (
     <ErrorBoundary>
-      <div className="w-full min-h-screen">
-        <TipTapEditor />
-      </div>
+      <AuthProvider>
+        <AppShell />
+      </AuthProvider>
     </ErrorBoundary>
   );
 }

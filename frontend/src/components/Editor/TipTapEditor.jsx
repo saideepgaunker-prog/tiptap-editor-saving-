@@ -77,7 +77,7 @@ import {
 } from '../../utils/docxExporter';
 import { PRESETS } from '../../constants/typography';
 import { SAMPLE_MANUSCRIPT_HTML } from '../../constants/sampleManuscript';
-import { Feather, RefreshCw, Layers, Edit3, BookOpen, Minimize2, WifiOff } from 'lucide-react';
+import { Feather, RefreshCw, Layers, Edit3, BookOpen, Minimize2, WifiOff, LogOut } from 'lucide-react';
 
 /**
  * Standalone Tiptap manuscript editor MVP.
@@ -96,11 +96,15 @@ export const TipTapEditor = forwardRef(function TipTapEditor(
     onTitleChange,
     readOnly = false,
     persistLocal = true,
+    userId: userIdProp,
+    userEmail,
+    onLogout,
   },
   ref
 ) {
   const isControlled = typeof content === 'string';
-  const demoUserId = useRef(getOrCreateDemoUserId()).current;
+  const demoUserId = useRef(userIdProp || getOrCreateDemoUserId()).current;
+  const accountUserId = userIdProp || demoUserId;
   const [docTitle, setDocTitle] = useState(defaultTitle);
 
   const [settings, setSettings] = useState(() => getSettings());
@@ -149,7 +153,7 @@ export const TipTapEditor = forwardRef(function TipTapEditor(
     if (isControlled) return content;
     if (typeof initialContent === 'string') return initialContent;
     if (persistLocal) {
-      const local = readLocalManuscript(demoUserId);
+      const local = readLocalManuscript(accountUserId);
       if (local?.html) return local.html;
     }
     return SAMPLE_MANUSCRIPT_HTML;
@@ -182,7 +186,8 @@ export const TipTapEditor = forwardRef(function TipTapEditor(
     notifyContentChanged,
     flushNow,
   } = useManuscriptAutosave({
-    enabled: persistLocal && !isControlled && !readOnly,
+    enabled: persistLocal && !isControlled && !readOnly && Boolean(accountUserId),
+    userId: accountUserId,
     getHtml: () =>
       editorRef.current
         ? normalizeHtmlForOutput(editorRef.current.getHTML())
@@ -701,6 +706,24 @@ export const TipTapEditor = forwardRef(function TipTapEditor(
           </div>
 
           <div className="flex items-center gap-2.5 text-xs text-slate-500 dark:text-slate-400">
+            {userEmail && (
+              <div className="hidden sm:flex items-center gap-1.5 max-w-[180px]">
+                <span className="truncate text-[11px] font-medium text-slate-600 dark:text-slate-300" title={userEmail}>
+                  {userEmail}
+                </span>
+                {typeof onLogout === 'function' && (
+                  <button
+                    type="button"
+                    onClick={onLogout}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-[11px] font-semibold text-slate-600 dark:text-slate-300"
+                    title="Log out"
+                  >
+                    <LogOut className="w-3 h-3" />
+                    Out
+                  </button>
+                )}
+              </div>
+            )}
             <div className="flex items-center bg-slate-100/80 dark:bg-slate-800 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/80 text-[11px]">
               <span className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-600 text-white font-semibold shadow-2xs">
                 <Edit3 className="w-3 h-3" />

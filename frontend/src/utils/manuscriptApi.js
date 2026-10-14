@@ -2,11 +2,22 @@
  * Production (Vercel): set VITE_API_BASE to Railway origin, e.g. https://xxx.up.railway.app
  * Local: leave empty so Vite proxies /api → backend (vite.config.js)
  */
+import { readAuthToken } from './authStorage.js';
+
 const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
 
 function apiUrl(path) {
   const p = path.startsWith('/') ? path : `/${path}`;
   return `${API_BASE}${p}`;
+}
+
+function authHeaders(extra = {}) {
+  const token = readAuthToken();
+  return {
+    Accept: 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra,
+  };
 }
 
 export class ManuscriptApiError extends Error {
@@ -31,19 +42,26 @@ async function parseJson(res) {
  * Fetch this user's manuscript from Mongo via the demo API.
  * @returns {Promise<object|null>}
  */
-export async function fetchManuscript(userId) {
+export async function fetchManuscript(_userId) {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     throw new ManuscriptApiError('Offline', { offline: true, code: 'OFFLINE' });
   }
 
   let res;
   try {
-    res = await fetch(apiUrl(`/api/manuscripts/me?userId=${encodeURIComponent(userId)}`), {
+    res = await fetch(apiUrl('/api/manuscripts/me'), {
       method: 'GET',
-      headers: { Accept: 'application/json' },
+      headers: authHeaders(),
     });
   } catch {
     throw new ManuscriptApiError('Network error', { offline: true, code: 'OFFLINE' });
+  }
+
+  if (res.status === 401) {
+    throw new ManuscriptApiError('Please log in again', {
+      status: 401,
+      code: 'UNAUTHORIZED',
+    });
   }
 
   if (res.status === 404) return null;
@@ -59,9 +77,9 @@ export async function fetchManuscript(userId) {
 }
 
 /**
- * Upsert Storygroove-style HTML to MongoDB.
+ * Upsert Storygroove-style HTML to MongoDB (auth user from JWT).
  */
-export async function saveManuscriptToDb({ userId, title, html }) {
+export async function saveManuscriptToDb({ title, html }) {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     throw new ManuscriptApiError('Offline', { offline: true, code: 'OFFLINE' });
   }
@@ -70,13 +88,8 @@ export async function saveManuscriptToDb({ userId, title, html }) {
   try {
     res = await fetch(apiUrl('/api/manuscripts/me'), {
       method: 'PUT',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
-      // Send both editor alias + Storygroove UserContent field names
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
-        userId,
         title,
         sceneTitle: title,
         html,
@@ -85,6 +98,13 @@ export async function saveManuscriptToDb({ userId, title, html }) {
     });
   } catch {
     throw new ManuscriptApiError('Network error', { offline: true, code: 'OFFLINE' });
+  }
+
+  if (res.status === 401) {
+    throw new ManuscriptApiError('Please log in again', {
+      status: 401,
+      code: 'UNAUTHORIZED',
+    });
   }
 
   const body = await parseJson(res);
@@ -101,6 +121,7 @@ export async function saveManuscriptToDb({ userId, title, html }) {
 export function isRetryableSaveError(error) {
   if (!error) return false;
   if (error.code === 'OFFLINE' || error.offline) return false;
+  if (error.code === 'UNAUTHORIZED') return false;
   if (error.code === 'RETRYABLE') return true;
   if (!error.status) return true;
   return error.status >= 500 || error.status === 429;

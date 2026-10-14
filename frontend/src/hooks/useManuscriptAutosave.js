@@ -18,17 +18,19 @@ import {
 } from '../utils/manuscriptApi.js';
 
 /**
- * Boot resolve + debounced local/DB HTML autosave for one manuscript per demo user.
+ * Boot resolve + debounced local/DB HTML autosave for one manuscript per user.
  *
  * saveStatus: 'loading' | 'unsaved' | 'saving' | 'saved' | 'offline' | 'error'
  */
 export function useManuscriptAutosave({
   enabled = true,
+  userId: userIdProp,
   getHtml,
   getTitle,
   onResolvedContent,
 } = {}) {
-  const userIdRef = useRef(getOrCreateDemoUserId());
+  const userIdRef = useRef(userIdProp || getOrCreateDemoUserId());
+  if (userIdProp) userIdRef.current = userIdProp;
   const [saveStatus, setSaveStatus] = useState(enabled ? 'loading' : 'saved');
   const [lastSavedTime, setLastSavedTime] = useState(null);
   const [bootDone, setBootDone] = useState(!enabled);
@@ -94,7 +96,6 @@ export function useManuscriptAutosave({
 
     try {
       const saved = await saveManuscriptToDb({
-        userId: userIdRef.current,
         title,
         html,
       });
